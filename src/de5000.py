@@ -241,7 +241,8 @@ class DE5000:
         res['sec_val'] = sec_value * 10 ** -(sec_info & 0x07)
         res['sec_norm_val'], res['sec_norm_units'] = self.normalize_val(res['sec_val'], res['sec_units'])
 
-        res['tolerance'] = TOLERANCE[tolerance]
+        # Some meter packets report undocumented codes, such as 0x40.
+        res['tolerance'] = TOLERANCE[tolerance] if tolerance < len(TOLERANCE) else None
         res['data_valid'] = True
         return res
 

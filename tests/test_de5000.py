@@ -81,6 +81,18 @@ class DE5000Tests(unittest.TestCase):
                 self.assertEqual(data['sec_units'], units)
                 self.assertAlmostEqual(data['sec_val'], expected)
 
+    def test_unknown_tolerance_preserves_measurement(self):
+        for tolerance in (0x40, 0x0b, 0xff):
+            with self.subTest(tolerance=tolerance):
+                packet = bytearray(PACKET)
+                packet[4] = tolerance
+                self.serial.read_until.return_value = bytes(packet)
+                data = self.meter.get_meas()
+                self.assertTrue(data['data_valid'])
+                self.assertIsNone(data['tolerance'])
+                self.assertAlmostEqual(data['main_val'], 123.45)
+                self.assertAlmostEqual(data['sec_val'], 1.234)
+
     def test_serial_mode_and_capacitance_normalization(self):
         packet = bytearray(PACKET)
         packet[2] = 0
@@ -127,7 +139,7 @@ class DE5000Tests(unittest.TestCase):
 
     def test_monitor_interrupt_closes_serial(self):
         with patch('sys.argv', ['de5000_reader.py', '/dev/test']), \
-             patch.object(de5000_reader.time, 'sleep', side_effect=KeyboardInterrupt), \
+             patch.object(DE5000, 'pretty_print', side_effect=KeyboardInterrupt), \
              redirect_stdout(io.StringIO()) as output:
             de5000_reader.main()
         self.assertEqual(self.serial_factory.call_args.args[0], '/dev/test')
