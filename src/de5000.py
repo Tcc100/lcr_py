@@ -3,8 +3,10 @@ Created on Sep 15, 2017
 
 @author: 4x1md
 
-Serial port settings: 9600 8N1 DTR=1 RTS=0 
+Serial port settings: 9600 8N1 DTR=1 RTS=0
 '''
+
+import struct
 
 import serial
 
@@ -16,7 +18,9 @@ STOP_BITS = serial.STOPBITS_ONE
 TIMEOUT = 1
 # Data packet ends with CR LF (\r \n) characters
 EOL = b'\x0D\x0A'
-RAW_DATA_LENGTH = 17
+# Big-endian packet: header, flags/config/tolerance, two measurements, footer.
+PACKET = struct.Struct(">2sBBBBHBBBHBB2s")
+RAW_DATA_LENGTH = PACKET.size
 READ_RETRIES = 3
 
 # Cyrustek ES51919 protocol constants
@@ -46,7 +50,7 @@ FREQ = [
     '10 KHz',
     '100 KHz',
     'DC'
-    ]
+]
 
 # Byte 0x04: tolerance
 TOLERANCE = [
@@ -60,7 +64,7 @@ TOLERANCE = [
     '+-10%',
     '+-20%',
     '-20+80%',
-    ]
+]
 
 # Byte 0x05: primary measured quantity (serial and parallel mode)
 MEAS_QUANTITY_SER = [None, 'Ls', 'Cs', 'Rs', 'DCR']
@@ -72,7 +76,7 @@ MAIN_UNITS = [
     'Ohm',
     'kOhm',
     'MOhm',
-    None, 
+    None,
     'uH',
     'mH',
     'H',
@@ -84,7 +88,7 @@ MAIN_UNITS = [
     '%',
     'deg',
     None, None, None, None, None, None
-    ]
+]
 
 # Bytes 0x09, 0x0E bits 0-3: Measurement display status
 STATUS = [
@@ -97,7 +101,7 @@ STATUS = [
     'FAIL',
     'OPEn',
     'Srt'
-    ]
+]
 
 # Byte 0x0a: secondary measured quantity
 SEC_QUANTITY = [
@@ -106,7 +110,7 @@ SEC_QUANTITY = [
     'Q',
     'ESR',
     'Theta'
-    ]
+]
 RP = 'RP'
 
 # Output format
@@ -117,7 +121,7 @@ MEAS_RES = {
     'main_status': None,
     'main_norm_val': None,
     'main_norm_units': None,
-    
+
     'sec_quantity': None,
     'sec_val': None,
     'sec_units': None,
@@ -134,293 +138,186 @@ MEAS_RES = {
     'lcr_auto': False,
     'auto_range': False,
     'parallel': False,
-    
+
     'data_valid': False
-    }
+}
 
 # Normalization constants
 # Each value contains multiplier and target value
 NORMALIZE_RULES = {
-    '':     (1, ''),
-    'Ohm':  (1, 'Ohm'),
+    '': (1, ''),
+    'Ohm': (1, 'Ohm'),
     'kOhm': (1E3, 'Ohm'),
     'MOhm': (1E6, 'Ohm'),
-    'uH':   (1E-6, 'H'),
-    'mH':   (1E-3, 'H'),
-    'H':    (1, 'H'),
-    'kH':   (1E3, 'H'),
-    'pF':   (1E-12, 'F'),
-    'nF':   (1E-9, 'F'),
-    'uF':   (1E-6, 'F'),
-    'mF':   (1E-3, 'F'),
-    '%':    (1, '%'),
-    'deg':  (1, 'deg')    
-    }
+    'uH': (1E-6, 'H'),
+    'mH': (1E-3, 'H'),
+    'H': (1, 'H'),
+    'kH': (1E3, 'H'),
+    'pF': (1E-12, 'F'),
+    'nF': (1E-9, 'F'),
+    'uF': (1E-6, 'F'),
+    'mF': (1E-3, 'F'),
+    '%': (1, '%'),
+    'deg': (1, 'deg')
+}
 
-class DE5000(object):
-    
+
+class DE5000:
+
     def __init__(self, port):
         self._port = port
-        self._ser = serial.Serial(self._port, BAUD_RATE, BITS, PARITY, STOP_BITS, timeout=TIMEOUT)
-        self._ser.setDTR(True)
-        self._ser.setRTS(False)
+        self._ser = serial.Serial(port, BAUD_RATE, BITS, PARITY, STOP_BITS, timeout=TIMEOUT)
+        self._ser.dtr = True
+        self._ser.rts = False
 
-    def read_raw_data(self):
-        '''Reads a new data packet from serial port.
-        If the packet was valid returns array of integers.
-        if the packet was not valid returns empty array.
-        
+    def read_raw_data(self) -> bytes:
+        """Reads a new data packet from serial port.
+        Returns bytes for a valid packet, or empty bytes if no valid packet
+        arrives within READ_RETRIES attempts.
+
         In order to get the last reading the input buffer is flushed
         before reading any data.
-        
-        If the first received packet contains less than 17 bytes, it is
-        not complete and the reading is done again. Maximum number of
-        retries is defined by READ_RETRIES value.
-        '''
+        """
         self._ser.reset_input_buffer()
-        
-        retries = 0
-        while retries < READ_RETRIES:
+        for _ in range(READ_RETRIES):
             raw_data = self._ser.read_until(EOL, RAW_DATA_LENGTH)
-            # If 17 bytes were read, the packet is valid and the loop ends.
-            if len(raw_data) == RAW_DATA_LENGTH:
-                break
-            retries += 1
+            if self.is_data_valid(raw_data):
+                return raw_data
+        return b""
 
-        res = []
-        # Check data validity
-        if self.is_data_valid(raw_data):
-            res = [ord(c) for c in raw_data]
-        return res
-
-    def is_data_valid(self, raw_data):
-        '''Checks data validity:
+    def is_data_valid(self, raw_data: bytes) -> bool:
+        """Checks data validity:
         1. 17 bytes long
         2. Header bytes 0x00 0x0D
-        3. Footer bytes 0x0D 0x0A'''
-        # Data length
-        if len(raw_data) != RAW_DATA_LENGTH:
-            return False
-        
-        # Start bits
-        if raw_data[0] != '\x00' or raw_data[1] != '\x0D':
-            return False
-        
-        # End bits
-        if raw_data[15] != '\x0D' or raw_data[16] != '\x0A':
-            return False
-        
-        return True
-    
-    def read_hex_str_data(self):
-        '''Returns raw data represented as string with hexadecimal values.'''
-        data = self.read_raw_data()
-        codes = ["0x%02X" % c for c in data]
-        return " ".join(codes)
-    
-    def get_meas(self):
-        '''Returns received measurement as dictionary'''
+        3. Footer bytes 0x0D 0x0A
+        """
+        return (
+                len(raw_data) == RAW_DATA_LENGTH
+                and raw_data[:2] == b"\x00\x0d"
+                and raw_data[-2:] == EOL
+        )
+
+    def read_hex_str_data(self) -> str:
+        """Returns raw data represented as string with hexadecimal values."""
+        return " ".join(f"0x{value:02X}" for value in self.read_raw_data())
+
+    def get_meas(self) -> dict:
+        """Returns received measurement as dictionary."""
         res = MEAS_RES.copy()
-        
         raw_data = self.read_raw_data()
-        
-        # If raw data is empty, return
-        if len(raw_data) == 0:
-            res['data_valid'] = False
+        if not raw_data:
             return res
-        
-        # Frequency
-        val = raw_data[0x03]
-        val &= 0b11100000
-        val = val >> 5
-        res['freq'] = FREQ[val]
-        
-        # Reference shown
-        val = raw_data[0x02]
-        val &= REF_SHOWN 
-        res['ref_shown'] = True if val else False
-        
-        # Delta mode
-        val = raw_data[0x02]
-        val &= DELTA
-        res['delta_mode'] = True if val else False
 
-        # Calibration mode
-        val = raw_data[0x02]
-        val &= CAL
-        res['cal_mode'] = True if val else False
+        (
+            _header, flags, config, tolerance,
+            main_quantity, main_value, main_info, main_status,
+            sec_quantity, sec_value, sec_info, sec_status, _footer,
+        ) = PACKET.unpack(raw_data)
 
-        # Sorting mode
-        val = raw_data[0x02]
-        val &= SORTING
-        res['sorting_mode'] = True if val else False
+        res['freq'] = FREQ[config >> 5]
+        res['ref_shown'] = bool(flags & REF_SHOWN)
+        res['delta_mode'] = bool(flags & DELTA)
+        res['cal_mode'] = bool(flags & CAL)
+        res['sorting_mode'] = bool(flags & SORTING)
+        res['lcr_auto'] = bool(flags & LCR_AUTO)
+        res['auto_range'] = bool(flags & AUTO_RANGE)
+        res['parallel'] = bool(flags & PARALLEL)
 
-        # LCR AUTO mode
-        val = raw_data[0x02]
-        val &= LCR_AUTO
-        res['lcr_auto'] = True if val else False
-
-        # Auto range
-        val = raw_data[0x02]
-        val &= AUTO_RANGE
-        res['auto_range'] = True if val else False
-
-        # Parallel measurement
-        val = raw_data[0x02]
-        val &= PARALLEL
-        res['parallel'] = True if val else False
-        
         # Main measurement
-        # Status
-        val = raw_data[0x09]
-        val &= 0b00001111
-        res['main_status'] = STATUS[val]
-        
-        # Quantity
-        val = raw_data[0x05]
-        if res['parallel']:
-            res['main_quantity'] = MEAS_QUANTITY_PAR[val]
-        else:
-            res['main_quantity'] = MEAS_QUANTITY_SER[val]
-        
-        # Value
-        val = raw_data[0x06] * 0x100 + raw_data[0x07]
-        mul = raw_data[0x08]
-        mul &= 0b00000111
-        val = val * 10**-mul
-        res['main_val'] = val
-        
-        # Units
-        val = raw_data[0x08]
-        val &= 0b11111000
-        val = val >> 3
-        res['main_units'] = MAIN_UNITS[val]
-        
-        # Normalize value
-        nval = self.normalize_val(res['main_val'], res['main_units'])
-        res['main_norm_val'] = nval[0]
-        res['main_norm_units'] = nval[1]
-        
-        # Secondary measurement
-        # Status
-        val = raw_data[0x0E]
-        val &= 0b00000111
-        res['sec_status'] = STATUS[val]
-        
-        # Quantity
-        val = raw_data[0x0A]
-        if res['parallel'] and val == 0x03:
-            res['sec_quantity'] = RP
-        else:
-            res['sec_quantity'] = SEC_QUANTITY[val]
-        
-        # Units
-        val = raw_data[0x0D]
-        val &= 0b11111000
-        val = val >> 3
-        res['sec_units'] = MAIN_UNITS[val]
-        
-        # Value
-        val = raw_data[0x0B] * 0x100 + raw_data[0x0C]
-        '''If units are % or deg, the value may be negative which is
-        represented in two's complement form.
-        In this case if the highest bit is 1, the value should be converted
-        to negative bu substracting it from 0x10000.'''
-        if res['sec_units'] in ('%', 'deg') and val & 0x1000:
-            val = val - 0x10000
-        mul = raw_data[0x0D]
-        mul &= 0b00000111
-        val = val * 10**-mul
-        res['sec_val'] = val
-        
-        # Normalize value
-        nval = self.normalize_val(res['sec_val'], res['sec_units'])
-        res['sec_norm_val'] = nval[0]
-        res['sec_norm_units'] = nval[1]
-        
-        # Tolerance
-        val = raw_data[0x04]
-        res['tolerance'] = TOLERANCE[val]
-        
-        res['data_valid'] = True
-        
-        return res
-    
-    def normalize_val(self, val, units):
-        '''Normalizes measured value to standard units. Resistance
-        is normalized to Ohm, capacitance to Farad and inductance
-        to Henry. Other units are not changed.'''
-        val = val * NORMALIZE_RULES[units][0]
-        units = NORMALIZE_RULES[units][1]
-        return (val, units) 
+        quantities = MEAS_QUANTITY_PAR if res['parallel'] else MEAS_QUANTITY_SER
+        res['main_quantity'] = quantities[main_quantity]
+        res['main_status'] = STATUS[main_status & 0x0f]
+        res['main_units'] = MAIN_UNITS[main_info >> 3]
+        res['main_val'] = main_value * 10 ** -(main_info & 0x07)
+        res['main_norm_val'], res['main_norm_units'] = self.normalize_val(res['main_val'], res['main_units'])
 
-    def pretty_print(self, disp_norm_val = False):
-        '''Prints measurement details in pretty print.
+        # Secondary measurement
+        res['sec_quantity'] = RP if res['parallel'] and sec_quantity == 3 else SEC_QUANTITY[sec_quantity]
+        res['sec_status'] = STATUS[sec_status & 0x0f]
+        res['sec_units'] = MAIN_UNITS[sec_info >> 3]
+        # Percentages and phase angles use signed, two's-complement values.
+        if res['sec_units'] in ('%', 'deg'):
+            sec_value = struct.unpack_from(">h", raw_data, 0x0b)[0]
+        res['sec_val'] = sec_value * 10 ** -(sec_info & 0x07)
+        res['sec_norm_val'], res['sec_norm_units'] = self.normalize_val(res['sec_val'], res['sec_units'])
+
+        res['tolerance'] = TOLERANCE[tolerance]
+        res['data_valid'] = True
+        return res
+
+    def normalize_val(self, val, units):
+        """Normalizes measured value to standard units. Resistance
+        is normalized to Ohm, capacitance to Farad and inductance
+        to Henry. Other units are not changed.
+        """
+        multiplier, normalized_units = NORMALIZE_RULES[units]
+        return val * multiplier, normalized_units
+
+    def pretty_print(self, disp_norm_val=False):
+        """Prints measurement details in pretty print.
         disp_norm_val: if True, normalized values will also be displayed.
-        '''
+        """
         data = self.get_meas()
-        
-        if data['data_valid'] == False:
-            print "DE-5000 is not connected."
+        if not data['data_valid']:
+            print("DE-5000 is not connected.")
             return
-        
+
         # In calibration mode frequency is not displayed.
         if data['cal_mode']:
-            print "Calibration"
+            print("Calibration")
         else:
             if data['sorting_mode']:
-                print "SORTING Tol %s" % data['tolerance']
-            print "Frequency: %s" % data['freq']
-        
-        # LCR autodetection mode    
+                print(f"SORTING Tol {data['tolerance']}")
+            print(f"Frequency: {data['freq']}")
+
+        # LCR autodetection mode
         if data['lcr_auto']:
-            print "LCR AUTO"
-        
+            print("LCR AUTO")
+
         # Auto range
         if data['auto_range']:
-            print "AUTO RNG"
-        
+            print("AUTO RNG")
+
         # Delta mode parameters
         if data['delta_mode']:
-            if data['ref_shown']:
-                print "DELTA Ref"
-            else:
-                print "DELTA"
-            
+            print("DELTA Ref" if data['ref_shown'] else "DELTA")
+
         # Main display
         if data['main_status'] == 'normal':
-            print "%s = %s %s" % (data['main_quantity'], data['main_val'], data['main_units'])
+            print(f"{data['main_quantity']} = {data['main_val']} {data['main_units']}")
         elif data['main_status'] == 'blank':
-            print
+            print()
         else:
-            print data['main_status']
-        
+            print(data['main_status'])
+
         # Secondary display
         if data['sec_status'] == 'normal':
-                if data['sec_quantity'] is not None:
-                    print "%s = %s %s" % (data['sec_quantity'], data['sec_val'], data['sec_units'])
-                else:
-                    print "%s %s" % (data['sec_val'], data['sec_units'])
+            if data['sec_quantity'] is not None:
+                print(f"{data['sec_quantity']} = {data['sec_val']} {data['sec_units']}")
+            else:
+                print(f"{data['sec_val']} {data['sec_units']}")
         elif data['sec_status'] == 'blank':
-            print
+            print()
         else:
-            print data['sec_status']
-        
+            print(data['sec_status'])
+
         # Display normalized values
         # If measurement status is not normal, ---- will be displayed.
         if disp_norm_val:
             if data['main_status'] == 'normal':
-                print "Primary: %s %s" % (data['main_norm_val'], data['main_norm_units'])
+                print(f"Primary: {data['main_norm_val']} {data['main_norm_units']}")
             else:
-                print "Primary: ----"
+                print("Primary: ----")
             if data['sec_status'] == 'normal':
-                print "Secondary: %s %s" % (data['sec_norm_val'], data['sec_norm_units'])
+                print(f"Secondary: {data['sec_norm_val']} {data['sec_norm_units']}")
             else:
-                print "Secondary: ----"
-        
-    def __del__(self):
-        if hasattr(self, '_ser'):
-            self._ser.close()
+                print("Secondary: ----")
 
-if __name__ == '__main__':
-    pass
+    def close(self):
+        self._ser.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()

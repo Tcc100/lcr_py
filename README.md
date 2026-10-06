@@ -127,7 +127,7 @@ Bytes 0x0A-0x0E describe secondary measurement
 
 Each measurement value is encoded by 3 bytes: two bytes for value (bytes 0x06, 0x07 for primary and 0x0B, 0x0C for secondary) and 3 bits of another byte for multiplier (bytes 0x08 for primary and 0x0D for secondary). The value can be calculated using the following formula:
 
-```(MSB * 0x10000 + LSB) * 10^-multiplier```
+```(MSB * 0x100 + LSB) * 10^-multiplier```
 
 ## Program structure, settings and output data format
 
@@ -139,7 +139,7 @@ Class constructor requires serial port name only. all other settings are defined
 
 ```TIMEOUT```: serial port read timeout.
 
-```EOL```: footer bytes of valid data packet. Always 0x0D 0x0D (CR, LF or \r\n).
+```EOL```: footer bytes of valid data packet. Always 0x0D 0x0A (CR, LF or \r\n).
 
 ```RAW_DATA_LENGTH```: data packet size.
 
@@ -147,7 +147,7 @@ Class constructor requires serial port name only. all other settings are defined
 
 The ```DE5000``` class contains the following functions:
 
-```read_raw_data(self)```: reads raw data packet from serial port as array of byte values.
+```read_raw_data(self)```: reads raw data packet from serial port as `bytes`, or returns `b''` if no valid packet is received.
 
 ```is_data_valid(self, raw_data)```: returns ```True``` if the received packet is valid.
 
@@ -158,6 +158,8 @@ The ```DE5000``` class contains the following functions:
 ```normalize_val(self, val, units)```:  normalizes the measured value to standard units (R to Ohm, C to Farad, L to Henry, others are not changed).
 
 ```pretty_print(self, disp_norm_val = False)```: prints the received measurement in human readable form.
+
+```close(self)```: closes the serial port. Use `with DE5000(port) as lcr:` to close it automatically when leaving the block.
 
 ### Returned data format
 
@@ -221,7 +223,7 @@ The received data is returned by ```get_meas()``` function as a dictionary with 
 
 The ```de5000_reader.py``` script is run from command line using the following command:
 
-```python de5000_reader.py [com_port_name]```
+```python3 src/de5000_reader.py [com_port_name]```
 
 where ```[com_port_name]``` is the name of serial port where your IR receiver is connected. In Windows it will be ```COM1```, ```COM2``` or another COM port. In Linux the will usually be ```/dev/ttyUSB0```, ```/dev/ttyUSB1``` etc. If not specified, the script will use port name stored in ```PORT``` constant.
 
