@@ -216,6 +216,7 @@ class DE5000:
         ) = PACKET.unpack(raw_data)
 
         res['freq'] = FREQ[config >> 5]
+        res['hold'] = bool(flags & HOLD)
         res['ref_shown'] = bool(flags & REF_SHOWN)
         res['delta_mode'] = bool(flags & DELTA)
         res['cal_mode'] = bool(flags & CAL)
@@ -271,6 +272,9 @@ class DE5000:
             if data['sorting_mode']:
                 print(f"SORTING Tol {data['tolerance']}")
             print(f"Frequency: {data['freq']}")
+
+        if data['hold']:
+            print("Hold")
 
         # LCR autodetection mode
         if data['lcr_auto']:
