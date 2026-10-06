@@ -167,25 +167,25 @@ The received data is returned by ```get_meas()``` function as a dictionary with 
 
 ```main_quantity``` [string]: main displayed quantity (Ls, Lp, Cs, Cp, Rs, Rp, DCR),
 
-```main_val``` [float]: main displayed value,
+```main_val``` [Decimal]: main displayed value,
 
 ```main_units``` [string]: main displayed units,
 
 ```main_status``` [string]: main display status (value, blank, OL, PASS, FAIL etc.),
 
-```main_norm_val``` [float]: main displayed value, normalized to standard units (Ohm, Farad, Henry),
+```main_norm_val``` [Decimal]: main displayed value, normalized to standard units (Ohm, Farad, Henry),
 
 ```main_norm_units``` [string]: units of normalized value, 
 
 ```sec_quantity``` [string]: secondary displayed quantity (D, Q, Theta, ESR etc.), 
 
-```sec_val``` [float]: secondary displayed value,
+```sec_val``` [Decimal]: secondary displayed value,
 
 ```sec_units``` [string]: secondary display units,
 
 ```sec_status``` [string]: secondary display status (value, blank, OL, ---- etc.),
 
-```sec_norm_val``` [float]: secondary displayed value, normalized to standard units (Ohm, Farad, Henry),
+```sec_norm_val``` [Decimal]: secondary displayed value, normalized to standard units (Ohm, Farad, Henry),
 
 ```sec_norm_units``` [string]: units of normalized value,
 

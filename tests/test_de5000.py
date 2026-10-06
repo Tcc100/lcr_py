@@ -1,6 +1,7 @@
 import io
 import unittest
 from contextlib import redirect_stdout
+from decimal import Decimal, FloatOperation, localcontext
 from unittest.mock import patch
 
 from src.de5000 import DE5000, EOL, MEAS_RES, RAW_DATA_LENGTH, READ_RETRIES
@@ -51,12 +52,12 @@ class DE5000Tests(unittest.TestCase):
         self.assertEqual(data['freq'], '1 KHz')
         self.assertEqual(data['tolerance'], '+-1%')
         self.assertEqual(data['main_quantity'], 'Rp')
-        self.assertAlmostEqual(data['main_val'], 123.45)
+        self.assertEqual(data['main_val'], Decimal('123.45'))
         self.assertEqual(data['main_units'], 'kOhm')
-        self.assertAlmostEqual(data['main_norm_val'], 123450)
+        self.assertEqual(data['main_norm_val'], Decimal('123450'))
         self.assertEqual(data['main_norm_units'], 'Ohm')
         self.assertEqual(data['sec_quantity'], 'RP')
-        self.assertAlmostEqual(data['sec_val'], 1.234)
+        self.assertEqual(data['sec_val'], Decimal('1.234'))
         self.assertEqual(data['sec_units'], 'Ohm')
         self.assertEqual(data['sec_norm_val'], data['sec_val'])
         for key in ('ref_shown', 'delta_mode', 'lcr_auto', 'auto_range', 'parallel'):
@@ -67,7 +68,7 @@ class DE5000Tests(unittest.TestCase):
     def test_signed_and_unsigned_secondary_values(self):
         for units, info, raw_value, expected in (
             ('deg', 0x70, b'\xff\xff', -1),
-            ('deg', 0x71, b'\x80\x00', -3276.8),
+            ('deg', 0x71, b'\x80\x00', Decimal('-3276.8')),
             ('deg', 0x70, b'\x12\x34', 4660),
             ('%', 0x69, b'\xff\x9c', -10),
             ('Ohm', 0x08, b'\xff\xff', 65535),
@@ -79,7 +80,7 @@ class DE5000Tests(unittest.TestCase):
                 self.serial.read_until.return_value = bytes(packet)
                 data = self.meter.get_meas()
                 self.assertEqual(data['sec_units'], units)
-                self.assertAlmostEqual(data['sec_val'], expected)
+                self.assertEqual(data['sec_val'], expected)
 
     def test_unknown_tolerance_preserves_measurement(self):
         for tolerance in (0x40, 0x0b, 0xff):
@@ -90,8 +91,28 @@ class DE5000Tests(unittest.TestCase):
                 data = self.meter.get_meas()
                 self.assertTrue(data['data_valid'])
                 self.assertIsNone(data['tolerance'])
-                self.assertAlmostEqual(data['main_val'], 123.45)
-                self.assertAlmostEqual(data['sec_val'], 1.234)
+                self.assertEqual(data['main_val'], Decimal('123.45'))
+                self.assertEqual(data['sec_val'], Decimal('1.234'))
+
+    def test_decimal_values_and_exact_small_unit_normalization(self):
+        packet = bytearray(PACKET)
+        packet[6:8] = b'\x00\x1d'  # 29, scaled to 0.29 pF
+        packet[8] = 0x4a
+        packet[11:13] = b'\x00\x1d'
+        packet[13] = 0x0a  # 0.29 Ohm
+        self.serial.read_until.return_value = bytes(packet)
+        with localcontext() as context:
+            context.traps[FloatOperation] = True
+            data = self.meter.get_meas()
+        for field in ('main_val', 'main_norm_val', 'sec_val', 'sec_norm_val'):
+            self.assertIsInstance(data[field], Decimal)
+        self.assertEqual(data['main_val'], Decimal('0.29'))
+        self.assertEqual(data['main_norm_val'], Decimal('0.00000000000029'))
+        self.assertEqual(data['sec_val'], Decimal('0.29'))
+        self.assertEqual(data['sec_norm_val'], Decimal('0.29'))
+        with redirect_stdout(io.StringIO()) as output:
+            self.meter.pretty_print(disp_norm_val=True)
+        self.assertIn('Primary: 0.00000000000029 F', output.getvalue())
 
     def test_serial_mode_and_capacitance_normalization(self):
         packet = bytearray(PACKET)
@@ -104,7 +125,7 @@ class DE5000Tests(unittest.TestCase):
         self.assertEqual(data['main_quantity'], 'Cs')
         self.assertEqual(data['sec_quantity'], 'ESR')
         self.assertEqual(data['main_units'], 'nF')
-        self.assertAlmostEqual(data['main_norm_val'], 123.45e-9)
+        self.assertEqual(data['main_norm_val'], Decimal('123.45e-9'))
         self.assertEqual(data['main_norm_units'], 'F')
 
     def test_secondary_status_uses_four_bits(self):
@@ -129,7 +150,7 @@ class DE5000Tests(unittest.TestCase):
         self.assertIn('Frequency: 1 KHz', output.getvalue())
         self.assertIn('Rp = 123.45 kOhm', output.getvalue())
         self.assertIn('RP = 1.234 Ohm', output.getvalue())
-        self.assertIn('Primary: 123450.0 Ohm', output.getvalue())
+        self.assertIn('Primary: 123450 Ohm', output.getvalue())
 
     def test_context_manager_closes_on_error(self):
         with self.assertRaises(RuntimeError):

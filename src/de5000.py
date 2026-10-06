@@ -6,6 +6,7 @@ Created on Sep 15, 2017
 Serial port settings: 9600 8N1 DTR=1 RTS=0
 '''
 
+from decimal import Decimal
 import struct
 
 import serial
@@ -145,20 +146,20 @@ MEAS_RES = {
 # Normalization constants
 # Each value contains multiplier and target value
 NORMALIZE_RULES = {
-    '': (1, ''),
-    'Ohm': (1, 'Ohm'),
-    'kOhm': (1E3, 'Ohm'),
-    'MOhm': (1E6, 'Ohm'),
-    'uH': (1E-6, 'H'),
-    'mH': (1E-3, 'H'),
-    'H': (1, 'H'),
-    'kH': (1E3, 'H'),
-    'pF': (1E-12, 'F'),
-    'nF': (1E-9, 'F'),
-    'uF': (1E-6, 'F'),
-    'mF': (1E-3, 'F'),
-    '%': (1, '%'),
-    'deg': (1, 'deg')
+    '': (Decimal('1'), ''),
+    'Ohm': (Decimal('1'), 'Ohm'),
+    'kOhm': (Decimal('1e3'), 'Ohm'),
+    'MOhm': (Decimal('1e6'), 'Ohm'),
+    'uH': (Decimal('1e-6'), 'H'),
+    'mH': (Decimal('1e-3'), 'H'),
+    'H': (Decimal('1'), 'H'),
+    'kH': (Decimal('1e3'), 'H'),
+    'pF': (Decimal('1e-12'), 'F'),
+    'nF': (Decimal('1e-9'), 'F'),
+    'uF': (Decimal('1e-6'), 'F'),
+    'mF': (Decimal('1e-3'), 'F'),
+    '%': (Decimal('1'), '%'),
+    'deg': (Decimal('1'), 'deg')
 }
 
 
@@ -228,7 +229,7 @@ class DE5000:
         res['main_quantity'] = quantities[main_quantity]
         res['main_status'] = STATUS[main_status & 0x0f]
         res['main_units'] = MAIN_UNITS[main_info >> 3]
-        res['main_val'] = main_value * 10 ** -(main_info & 0x07)
+        res['main_val'] = Decimal(main_value).scaleb(-(main_info & 0x07))
         res['main_norm_val'], res['main_norm_units'] = self.normalize_val(res['main_val'], res['main_units'])
 
         # Secondary measurement
@@ -238,7 +239,7 @@ class DE5000:
         # Percentages and phase angles use signed, two's-complement values.
         if res['sec_units'] in ('%', 'deg'):
             sec_value = struct.unpack_from(">h", raw_data, 0x0b)[0]
-        res['sec_val'] = sec_value * 10 ** -(sec_info & 0x07)
+        res['sec_val'] = Decimal(sec_value).scaleb(-(sec_info & 0x07))
         res['sec_norm_val'], res['sec_norm_units'] = self.normalize_val(res['sec_val'], res['sec_units'])
 
         # Some meter packets report undocumented codes, such as 0x40.
@@ -246,7 +247,7 @@ class DE5000:
         res['data_valid'] = True
         return res
 
-    def normalize_val(self, val, units):
+    def normalize_val(self, val: Decimal, units: str) -> tuple[Decimal, str]:
         """Normalizes measured value to standard units. Resistance
         is normalized to Ohm, capacitance to Farad and inductance
         to Henry. Other units are not changed.
@@ -285,7 +286,7 @@ class DE5000:
 
         # Main display
         if data['main_status'] == 'normal':
-            print(f"{data['main_quantity']} = {data['main_val']} {data['main_units']}")
+            print(f"{data['main_quantity']} = {data['main_val']:f} {data['main_units']}")
         elif data['main_status'] == 'blank':
             print()
         else:
@@ -294,9 +295,9 @@ class DE5000:
         # Secondary display
         if data['sec_status'] == 'normal':
             if data['sec_quantity'] is not None:
-                print(f"{data['sec_quantity']} = {data['sec_val']} {data['sec_units']}")
+                print(f"{data['sec_quantity']} = {data['sec_val']:f} {data['sec_units']}")
             else:
-                print(f"{data['sec_val']} {data['sec_units']}")
+                print(f"{data['sec_val']:f} {data['sec_units']}")
         elif data['sec_status'] == 'blank':
             print()
         else:
@@ -306,11 +307,11 @@ class DE5000:
         # If measurement status is not normal, ---- will be displayed.
         if disp_norm_val:
             if data['main_status'] == 'normal':
-                print(f"Primary: {data['main_norm_val']} {data['main_norm_units']}")
+                print(f"Primary: {data['main_norm_val']:f} {data['main_norm_units']}")
             else:
                 print("Primary: ----")
             if data['sec_status'] == 'normal':
-                print(f"Secondary: {data['sec_norm_val']} {data['sec_norm_units']}")
+                print(f"Secondary: {data['sec_norm_val']:f} {data['sec_norm_units']}")
             else:
                 print("Secondary: ----")
 
