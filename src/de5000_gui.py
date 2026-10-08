@@ -32,6 +32,14 @@ UNITS = {"Ohm": "Ω", "kOhm": "kΩ", "MOhm": "MΩ", "uH": "µH", "uF": "µF", "d
 QUANTITIES = {"Theta": "θ", "RP": "Rp"}
 POLL_MS = 150
 
+# Ports worth offering by default: USB serial adapters, CDC-ACM, Raspberry Pi / SoC UARTs,
+# Bluetooth serial, Windows COM ports and macOS USB serial devices. The legacy /dev/ttyS*
+# placeholders (usually dozens of them, rarely connected) only show with "All ports".
+USEFUL_PORT = re.compile(
+    r"(/dev/(tty(USB|ACM|AMA|THS|mxc|XRUSB|CH341USB)\d+|serial\d+|rfcomm\d+|serial/by-id/.+)"
+    r"|COM\d+"
+    r"|/dev/cu\.(usb|wch|SLAB|PL2303).*)$")
+
 
 def fmt_value(part):
     """'Cs  100.23 nF' style text for one display of a reading or recording."""
@@ -76,6 +84,7 @@ class App(ttk.Frame):
         self._build_lists()
 
         root.bind("<Control-r>", lambda e: self.record())
+        root.bind("<Control-e>", lambda e: self.record_entry_now())
         self.refresh_ports()
         if service.port:
             self.port_var.set(service.port)
@@ -91,6 +100,9 @@ class App(ttk.Frame):
         self.port_box = ttk.Combobox(f, textvariable=self.port_var, width=24)
         self.port_box.pack(side="left", padx=4)
         ttk.Button(f, text="Refresh", command=self.refresh_ports).pack(side="left")
+        self.all_ports_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="All ports", variable=self.all_ports_var,
+                        command=self.refresh_ports).pack(side="left", padx=(4, 0))
         self.connect_btn = ttk.Button(f, text="Connect", command=self.toggle_connect)
         self.connect_btn.pack(side="left", padx=4)
         self.link_var = tk.StringVar()
@@ -141,20 +153,23 @@ class App(ttk.Frame):
                         variable=self.auto_var, command=self.apply_auto).grid(row=0, column=0, columnspan=4, sticky="w")
         self.auto_status = tk.StringVar(value="Off")
         ttk.Label(auto, textvariable=self.auto_status, wraplength=380).grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(2, 6))
+            row=1, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        ttk.Button(auto, text="Record into ▶ entry now (Ctrl+E)", command=self.record_entry_now).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(0, 6))
 
         self.setting_vars = {}
         specs = [("window", "Stable for (s)", 0.2, 60, 0.5),
                  ("tolerance", "Max spread (%)", 0.01, 50, 0.1),
                  ("counts", "or display counts", 0, 1000, 1),
-                 ("rearm", "Re-arm on change (%)", 0.1, 1000, 1)]
+                 ("rearm", "Re-arm on change (%)", 0.1, 1000, 1),
+                 ("cmin", "Ignore C below (pF)", 0, 1e6, 1)]
         for i, (key, text, lo, hi, inc) in enumerate(specs):
             var = tk.StringVar(value=f"{self.svc.settings[key]:g}")
             self.setting_vars[key] = (var, lo, hi)
-            ttk.Label(auto, text=text).grid(row=2 + i // 2, column=(i % 2) * 2, sticky="w", padx=(0, 4))
+            ttk.Label(auto, text=text).grid(row=3 + i // 2, column=(i % 2) * 2, sticky="w", padx=(0, 4))
             sb = ttk.Spinbox(auto, textvariable=var, from_=lo, to=hi, increment=inc, width=7,
                              command=self.apply_auto)
-            sb.grid(row=2 + i // 2, column=(i % 2) * 2 + 1, sticky="w", padx=(0, 12), pady=1)
+            sb.grid(row=3 + i // 2, column=(i % 2) * 2 + 1, sticky="w", padx=(0, 12), pady=1)
             sb.bind("<Return>", lambda e: self.apply_auto())
             sb.bind("<FocusOut>", lambda e: self.apply_auto())
 
@@ -176,11 +191,8 @@ class App(ttk.Frame):
             self.plan_tree.heading(col, text=text)
             self.plan_tree.column(col, width=width, stretch=col != "next")
         self.plan_tree.grid(row=3, column=0, sticky="nsew", pady=(6, 2))
-        self.plan_tree.bind("<Double-1>", lambda e: self.select_entry(redo=False))
-        btns = ttk.Frame(ent)
-        btns.grid(row=4, column=0, sticky="w")
-        ttk.Button(btns, text="Measure next", command=lambda: self.select_entry(False)).pack(side="left")
-        ttk.Button(btns, text="Redo", command=lambda: self.select_entry(True)).pack(side="left", padx=4)
+        self.plan_tree.bind("<Double-1>", lambda e: self.select_entry())
+        ttk.Button(ent, text="Measure this next", command=self.select_entry).grid(row=4, column=0, sticky="w")
         pane.add(ent, weight=1)
 
         # Recordings
@@ -213,7 +225,11 @@ class App(ttk.Frame):
     # -- actions ------------------------------------------------------------
 
     def refresh_ports(self):
-        ports = [p.device for p in sorted(list_ports.comports(), key=lambda p: p.device)] if list_ports else []
+        ports = sorted(p.device for p in list_ports.comports()) if list_ports else []
+        if not self.all_ports_var.get():
+            ports = [p for p in ports if USEFUL_PORT.match(p)]
+        if self.svc.port and self.svc.port != DEMO_PORT and self.svc.port not in ports:
+            ports.insert(0, self.svc.port)
         self.port_box["values"] = ports + [DEMO_PORT]
         if not self.port_var.get() and ports:
             self.port_var.set(ports[0])
@@ -261,10 +277,16 @@ class App(ttk.Frame):
         except RecorderError as exc:
             messagebox.showwarning("Set entries", str(exc))
 
-    def select_entry(self, redo):
+    def select_entry(self):
         sel = self.plan_tree.selection()
         if sel:
-            self.svc.select_entry(int(sel[0]), redo=redo)
+            self.svc.select_entry(int(sel[0]))
+
+    def record_entry_now(self):
+        try:
+            self.svc.record_entry_now()
+        except RecorderError as exc:
+            messagebox.showwarning("Record into entry", str(exc))
 
     def _selected_recs(self):
         return [int(i) for i in self.rec_tree.selection()]
@@ -349,7 +371,10 @@ class App(ttk.Frame):
 
         if stab["state"] == "none":
             self.stab_bar["value"] = 0
-            self.stab_var.set("No value to check for stability")
+            if stab.get("reason") == "below_cmin":
+                self.stab_var.set(f"Below {svc.settings['cmin']:g} pF, treated as open probes")
+            else:
+                self.stab_var.set("No value to check for stability")
         else:
             self.stab_bar["value"] = stab["progress"] * 100
             spread = "" if stab["spread_pct"] is None else (
@@ -357,15 +382,23 @@ class App(ttk.Frame):
             word = "Stable" if stab["state"] == "stable" else "Settling"
             self.stab_var.set(f"{word} for {stab['stable_for']:.1f} s{spread}")
 
+        if self.auto_var.get() != auto["enabled"]:
+            self.auto_var.set(auto["enabled"])
         state = auto["state"]
         name = target["label"] if target else None
-        self.auto_status.set({
-            "off": "Off",
-            "armed": f"Waiting for a part. Next entry: {name}",
-            "settling": f"Settling… Next entry: {name}",
-            "saved": f"Saved {auto['last_label']}. Remove the part to continue.",
-            "done": "All entries measured." if plan_len else "No entries yet. Add labels under Entries.",
-        }.get(state, state))
+        if not auto["enabled"]:
+            if auto["finished"]:
+                text = ("All entries measured. Auto mode switched off." if plan_len
+                        else "No entries yet. Add labels under Entries.")
+            else:
+                text = f"Off. Next entry: {name}" if name else "Off"
+        else:
+            text = {
+                "armed": f"Waiting for a part. Next entry: {name}",
+                "settling": f"Settling… Next entry: {name}",
+                "saved": f"Saved {auto['last_label']}. Remove the part to continue. Next entry: {name}",
+            }.get(state, state)
+        self.auto_status.set(text)
 
     def update_data(self):
         svc = self.svc
@@ -376,7 +409,7 @@ class App(ttk.Frame):
             error = svc.error
         by_id = {r["id"]: r for r in recs}
 
-        sel = self.plan_tree.selection()
+        sel = [s for s in self.plan_tree.selection() if not target or s != str(target["id"])]
         self.plan_tree.delete(*self.plan_tree.get_children())
         for e in plan:
             rec = by_id.get(e["rec_id"])

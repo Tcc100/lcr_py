@@ -31,6 +31,7 @@ DEFAULT_SETTINGS = {
     "tolerance": 0.5,   # max spread, % of reading
     "counts": 2,        # ...or this many display counts, whichever is larger
     "rearm": 10.0,      # % change (or OL / blank) that means "part removed"
+    "cmin": 10.0,       # pF; smaller capacitance readings are open-probe noise, not a part
 }
 
 CSV_FIELDS = [
@@ -78,7 +79,9 @@ class SimulatedDE5000:
         res = MEAS_RES.copy()
         res.update(freq="1 KHz", hold=False, auto_range=True, lcr_auto=True, data_valid=True)
         if self._phase == "open":
-            res.update(main_quantity="Cs", main_status="OL", main_units="nF", main_val=Decimal("0"),
+            # Open probes in LCR auto mode: a few pF of stray capacitance.
+            res.update(main_quantity="Cs", main_status="normal", main_units="pF",
+                       main_val=Decimal(f"{random.uniform(2.0, 4.5):.2f}"),
                        sec_quantity="D", sec_status="----", sec_units="", sec_val=Decimal("0"))
         else:
             (quantity, units, _, dec, sq, sunits, snom, sdec), target = self._part
@@ -142,11 +145,11 @@ class MeterService:
         self.history = deque(maxlen=1200)
         self.stability = {"state": "none"}
         self.settings = dict(DEFAULT_SETTINGS)
-        self.auto = {"enabled": False, "state": "off", "last_label": None,
+        self.auto = {"enabled": False, "state": "off", "last_label": None, "finished": False,
                      "last_value": None, "last_key": None, "last_lsd": 0.0}
         self.recordings = []
         self.plan = []              # [{"id", "label", "rec_id"}]
-        self.selected_plan = None
+        self.cursor = None          # id of the entry to fill next (None = first empty)
         self._next_id = 1
         self.live_version = 0       # bumps on every reading / status change
         self.data_version = 0       # bumps when recordings or entries change
@@ -255,18 +258,25 @@ class MeterService:
             self._auto_step()
             self.live_version += 1
 
+    def _is_part(self, h):
+        """False for no reading and for open-probe noise (tiny capacitance)."""
+        if h is None or h["v"] is None:
+            return False
+        return not (h["key"].startswith("C") and abs(h["v"]) < self.settings["cmin"] * 1e-12)
+
     def _compute_stability(self):
         s = self.settings
         last = self.history[-1] if self.history else None
-        if not last or last["v"] is None:
-            return {"state": "none"}
+        if not self._is_part(last):
+            below = last is not None and last["v"] is not None
+            return {"state": "none", "reason": "below_cmin" if below else "no_value"}
         ref = last["v"]
         allowed = max(abs(ref) * s["tolerance"] / 100.0, s["counts"] * last["lsd"])
         lo = hi = ref
         start, samples = last["t"], 0
         # Longest run of recent readings (same quantity/range/freq) whose spread fits the band.
         for h in reversed(self.history):
-            if h["v"] is None or h["key"] != last["key"]:
+            if not self._is_part(h) or h["key"] != last["key"]:
                 break
             nlo, nhi = min(lo, h["v"]), max(hi, h["v"])
             if nhi - nlo > allowed:
@@ -275,7 +285,7 @@ class MeterService:
             samples += 1
         stable_for = last["t"] - start
         recent = [h["v"] for h in self.history
-                  if h["v"] is not None and h["key"] == last["key"] and last["t"] - h["t"] <= s["window"]]
+                  if self._is_part(h) and h["key"] == last["key"] and last["t"] - h["t"] <= s["window"]]
         spread = max(recent) - min(recent) if recent else 0.0
         return {
             "state": "stable" if stable_for >= s["window"] and samples >= 3 else "settling",
@@ -285,14 +295,22 @@ class MeterService:
             "limit_pct": allowed / abs(ref) * 100.0 if ref else None,
         }
 
+    def _entry(self, entry_id):
+        return next((e for e in self.plan if e["id"] == entry_id), None)
+
     def next_entry(self):
+        """The entry the next auto / triggered recording goes into."""
         with self.lock:
-            if self.selected_plan is not None:
-                for e in self.plan:
-                    if e["id"] == self.selected_plan and e["rec_id"] is None:
-                        return e
-                self.selected_plan = None
+            entry = self._entry(self.cursor)
+            if entry is not None:
+                return entry
             return next((e for e in self.plan if e["rec_id"] is None), None)
+
+    def _advance(self, entry):
+        """Move the cursor to the next empty entry after `entry`, wrapping around."""
+        i = self.plan.index(entry)
+        order = self.plan[i + 1:] + self.plan[:i]
+        self.cursor = next((e["id"] for e in order if e["rec_id"] is None), None)
 
     def _auto_step(self):
         a = self.auto
@@ -301,8 +319,8 @@ class MeterService:
             return
         last = self.history[-1] if self.history else None
         if a["state"] == "saved":
-            # Wait until the part is removed (OL/blank, different quantity, or a clear change).
-            removed = last is None or last["v"] is None or last["key"] != a["last_key"]
+            # Wait until the part is removed (OL/blank/noise, different quantity, or a clear change).
+            removed = not self._is_part(last) or last["key"] != a["last_key"]
             if not removed:
                 ref = a["last_value"]
                 limit = max(abs(ref) * self.settings["rearm"] / 100.0, 10 * a["last_lsd"])
@@ -312,13 +330,39 @@ class MeterService:
             a["state"] = "armed"
         target = self.next_entry()
         if target is None:
-            a["state"] = "done"
+            a.update(enabled=False, state="off", finished=True)
         elif self.stability["state"] == "stable":
-            rec = self._record(target["label"], target, "auto")
-            a.update(state="saved", last_label=rec["label"], last_value=last["v"],
-                     last_key=last["key"], last_lsd=last["lsd"])
+            self._record_entry(target, "auto")
         else:
             a["state"] = "settling" if self.stability["state"] == "settling" else "armed"
+
+    def _record_entry(self, entry, source):
+        last = self.history[-1] if self.history else None
+        rec = self._record(entry["label"], entry, source)
+        self._advance(entry)
+        a = self.auto
+        a["last_label"] = rec["label"]
+        if self.next_entry() is None:
+            if a["enabled"]:
+                a.update(enabled=False, state="off", finished=True)
+        elif a["enabled"]:
+            if self._is_part(last):
+                a.update(state="saved", last_value=last["v"], last_key=last["key"], last_lsd=last["lsd"])
+            else:
+                a["state"] = "armed"
+        self.data_version += 1
+        return rec
+
+    def record_entry_now(self):
+        """Record the current reading into the next entry, ignoring the stability check."""
+        with self.lock:
+            target = self.next_entry()
+            if target is None:
+                raise RecorderError("There is no entry to record into. Add entries first, "
+                                    "or select one and click 'Measure this next'.")
+            rec = self._record_entry(target, "triggered")
+            self.live_version += 1
+            return rec
 
     # -- recordings ---------------------------------------------------------
 
@@ -343,8 +387,6 @@ class MeterService:
             if entry["rec_id"] is not None:
                 self.recordings = [x for x in self.recordings if x["id"] != entry["rec_id"]]
             entry["rec_id"] = rec["id"]
-            if self.selected_plan == entry["id"]:
-                self.selected_plan = None
         self.recordings.append(rec)
         self._changed()
         return rec
@@ -381,23 +423,18 @@ class MeterService:
             for label in labels:
                 self.plan.append({"id": self._next_id, "label": label, "rec_id": None})
                 self._next_id += 1
-            self.selected_plan = None
-            if self.auto["state"] == "done":
-                self.auto["state"] = "armed"
+            self.cursor = None
+            self.auto["finished"] = False
             self._changed()
 
-    def select_entry(self, entry_id, redo=False):
+    def select_entry(self, entry_id):
+        """Make this entry the next one. A filled entry keeps its value until re-measured."""
         with self.lock:
-            entry = next((e for e in self.plan if e["id"] == entry_id), None)
-            if entry is None:
-                return
-            if redo and entry["rec_id"] is not None:
-                self.recordings = [x for x in self.recordings if x["id"] != entry["rec_id"]]
-                entry["rec_id"] = None
-            self.selected_plan = entry["id"] if entry["rec_id"] is None else None
-            if self.auto["state"] == "done":
-                self.auto["state"] = "armed"
-            self._changed()
+            if self._entry(entry_id) is not None:
+                self.cursor = entry_id
+                self.auto["finished"] = False
+                self.data_version += 1
+                self.live_version += 1
 
     def set_auto(self, enabled=None, **settings):
         with self.lock:
@@ -405,7 +442,8 @@ class MeterService:
                 self.settings[key] = float(value)
             if enabled is not None:
                 if enabled and not self.auto["enabled"]:
-                    self.auto.update(state="armed", last_label=None, last_value=None, last_key=None)
+                    self.auto.update(state="armed", finished=False, last_label=None,
+                                     last_value=None, last_key=None)
                 self.auto["enabled"] = bool(enabled)
             self.stability = self._compute_stability()
             self._auto_step()
